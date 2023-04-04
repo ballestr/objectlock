@@ -18,17 +18,39 @@ It should be possible to do pretty much the same thing with AWS S3 using [its CL
 * create an AppKey with `writeFileRetentions,readFileRetentions` permissions - the AppKeys created from the WebUI do not have those
   `b2 create-key --bucket <bucket_name> <key_name> deleteFiles,listAllBucketNames,listBuckets,listFiles,readBucketEncryption,readBucketReplications,readBuckets,readFiles,shareFiles,writeBucketEncryption,writeBucketReplications,writeFiles,writeFileRetentions,readFileRetentions`
 * authenticate using 
-  `b2 authorize-account <keyID>`
-* generate a JSON file list 
-  `b2 ls --json --recursive <bucket> | tee <bucket>.ls.json`
-* adjust the code for retention settings 
-  use `governance` for testing!
-* run `./b2_objectlock_all.py`
+  `b2 authorize-account --profile <profilename> <keyID>`
+* run `./b2_objectlock_all.py --profile <profilename> <bucket> <path>` to check
+* run with `--update` to apply the corrections
 * adjust the B2 bucket 
   * Lifecycle Settings to
     "Keep prior versions for this number of days: N" with N=lockdays+1
   * For testing, I think it's better not to set a default object lock mode and retention. 
     For production it may be appropriate to set a default retention larger than the interval between runs of `b2_objectlock_all`
+
+```
+host:objectlock$ ./b2_objectlock_all.py --help
+usage: b2_objectlock_all.py [-h] --profile PROFILE [--fileagemax FILEAGEMAX] [--lockmode {governance}] [--lockdays LOCKDAYS] [--update] bucket path
+
+check or update B2 Object Locks
+
+positional arguments:
+  bucket
+  path
+
+options:
+  -h, --help            show this help message and exit
+  --profile PROFILE     B2 profile
+  --fileagemax FILEAGEMAX
+                        max age of ls cache file in seconds, default 600
+  --lockmode {governance}
+                        Lock mode
+  --lockdays LOCKDAYS   Lock for days
+  --update              Update lock mode & days
+```
+
+## known bugs
+The ls cache file uses only the bucket name, not the path. If you change path, the script will still process the last cached file list. 
+Force a refresh by deleting the cache files `*.ls.json`.
 
 ## usage with rclone
 Currently I'm testing this code with a small size backup made with rclone. 
