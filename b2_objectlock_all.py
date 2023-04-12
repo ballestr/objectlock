@@ -12,15 +12,23 @@ import argparse
 parser = argparse.ArgumentParser(
     description="check or update B2 Object Locks"
 )
-parser.add_argument("--profile", help="B2 profile", required=True)
-parser.add_argument("--fileagemax", help="max age of ls cache file in seconds, default 600", default=(10*60))
+## https://stackoverflow.com/questions/25295487/python-argparse-value-range-help-message-appearance
+parser.add_argument("--profile",  help="B2 profile", required=True)
+parser.add_argument("--fileagemax", help="max age of ls cache file in seconds, default=600", default=(10*60))
 parser.add_argument("--lockmode", help="Lock mode",choices=["governance"],default="governance") ## play safe
 #parser.add_argument("--lockmode", help="Lock mode",choices=["governance","compliance"],default="governance")
-parser.add_argument("--lockdays", help="Lock for days",type=int,default=7)
-parser.add_argument("--update", help="Update lock mode & days",action="store_true")
+parser.add_argument("--lockdays", help="Lock for days, default=7",type=int,default=7,choices=range(0, 91),metavar="[0-90]" )
+parser.add_argument("--lockmax",  help="Max Lock for days, default=30",type=int,default=30,choices=range(0,91),metavar="[0-90]" )
+parser.add_argument("--update",   help="Update lock mode & days",action="store_true")
+parser.add_argument("--iskopia",  help="Ignore Kopia logs & maintenance",action="store_true")
 parser.add_argument("bucket")
 parser.add_argument("path",default="")
 args = parser.parse_args()
+## some argument sanity checks
+if ( args.lockmax <= args.lockdays ):
+    args.lockmax = (args.lockdays * 1.10)
+    print("WARNING: lockmax < lockdays, reset to %f days"%args.lockmax)
+## debug args
 print(args)
 
 ## object lock mode & time
@@ -113,14 +121,21 @@ for i in data:
     if ( i["fileRetention"]["mode"]=='unknown' ) :
         print("Error: fileRetention.mode is unknown, need capable API token")
         break
+    if ( args.iskopia ):
+        if ( i["fileName"].startswith("_log_") or i["fileName"] == "kopia.maintenance" ) :
+            ## ignore kopia logs and maintenance
+            continue
     if ( ts_ret < ts_now ):
         print("  ALERT: this object lock was EXPIRED!")
+    elif ( (ts_ret-ts_now)>(args.lockmax*24*60*60) ):
+        print("  ALERT: this object lock is too far in the future, >%d days"%args.lockmax)
+        print("    b2 update-file-retention --profile MAK --bypassGovernance --retainUntil=%d %s %s %s"%(int(ts_new),i["fileName"],i["fileId"],"governance") )
 
     ## set the object lock if missing or expiring in less than ts_new minus one day (e.g. 6 days if ts_new is +7 days)
     ## ok on B2 where b2_update_file_retention is class A, free
     if ( i["fileRetention"]["mode"]==None or i["fileRetention"]["retainUntilTimestamp"]==None or ts_ret+(24*60*60) < ts_new ) :
         n_updates+=1
-        if ( args.update==False ):
+        if ( args.update==False ) :
             print("  ALERT: needs update %s"%(i["fileName"]))
             continue
         fileId=i["fileId"]
@@ -130,7 +145,7 @@ for i in data:
                          stdout=subprocess.PIPE, 
                          universal_newlines=True)
         print(process.stdout,end='')
-        if ( process.returncode !=0 ):
+        if ( process.returncode !=0 ) :
             print("FATAL: b2 returned an error code %d"%process.returncode)
             exit(1)
 # Closing file
