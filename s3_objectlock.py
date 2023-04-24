@@ -38,6 +38,8 @@ class S3Bucket:
         self.ops_cleanup_s=0
         self.ops_extend_n=0
         self.ops_extend_s=0
+        self.lockmax_n=0
+        self.lockmax_s=0
         self.total_n=0
         self.total_s=0
 
@@ -134,6 +136,7 @@ class S3Bucket:
         print( "     expird: %5s %7.2fMiB"%(self.ver_exp_n,    self.ver_exp_s/2**20))
         print( "   cleanup : %5s %7.2fMiB"%(self.ops_cleanup_n,self.ops_cleanup_s/2**20))
         print( "   extend  : %5s %7.2fMiB"%(self.ops_extend_n, self.ops_extend_s/2**20))
+        print( "   lockmax : %5s %7.2fMiB"%(self.lockmax_n, self.lockmax_s/2**20))
         print( "Check total: n %d/%d s %d/%d"%( self.cur_n+self.ver_n,self.total_n, self.cur_s+self.ver_s,self.total_s) )
 
     def objectlock_page(self,NextKeyMarker,NextVersionIdMarker):
@@ -219,8 +222,10 @@ class S3Bucket:
                 update=True
             elif ( dt < args.lockdays/2 ) :
                 update=True
-            elif ( dt > args.lockmax ):
+            elif ( dt >= args.lockmax ):
                 state="M"
+                self.lockmax_n+=1
+                self.lockmax_s+=v["Size"]
 
             ## collect some stats
             if ( expired ) :
@@ -233,8 +238,8 @@ class S3Bucket:
 
             if ( args.quiet == False or state != "-"):
                 print("%1s%1s %+ 7.2fd % 6.2fd %6.2fMiB %s %s"%(cstate,state,dt,age,v["Size"]/2**20,ol["Mode"],v["Key"]) )
-            if ( state=="X" ):
-                print("  ALERT: this object lock is too far in the future, >%d days"%args.lockmax)
+            if ( state=="M" ):
+                print("  ALERT: this object lock is too far in the future, %0.2f >%0.2f days"%(dt,args.lockmax))
                 #print("    b2 update-file-retention --profile MAK --bypassGovernance --retainUntil=%d %s %s %s"%(int(ts_new),v["Key"],i["fileId"],"governance") )
 
             ## clean-up old versions and deleted files
