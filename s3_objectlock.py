@@ -6,6 +6,7 @@
 ## https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html#client
 
 import boto3
+import botocore.exceptions
 from pprint import pprint
 import logging
 import os
@@ -23,14 +24,12 @@ class S3Bucket:
         ## counters
         self.ver_nolock_n=0
         self.ver_nolock_s=0
-        self.ver_keep_n=0
-        self.ver_keep_s=0
         self.ver_exp_n=0
         self.ver_exp_s=0
         self.ver_n=0
         self.ver_s=0
-        self.last_n=0
-        self.last_s=0
+        self.cur_n=0
+        self.cur_s=0
         self.cur_nolock_n=0
         self.cur_nolock_s=0
         self.cur_exp_n=0
@@ -42,6 +41,12 @@ class S3Bucket:
         self.total_n=0
         self.total_s=0
 
+
+    def head_bucket(self):
+        print("##########################################################"*4)
+        res=self.s3.head_bucket(Bucket=self.bucket_name)
+        del res['ResponseMetadata']
+        print(res)
 
     def get_object_lock_configuration(self):
         print("##########################################################"*4)
@@ -105,19 +110,23 @@ class S3Bucket:
                 #print(NextKeyMarker,NextVersionIdMarker)
                 if (NextKeyMarker==None):
                     break
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt,SystemExit) as exception:
+            #logging.warning(f"KI Exception Desc: {exception}")
             pass
         except BaseException as exception:
+            logging.warning(f"BE Exception Name: {type(exception).__name__}")
+            logging.warning(f"BE Exception Desc: {exception}")
             raise exception
 
         ## how much overhead due to object locking ?
-        #overhead=(ver_keep_s+ver_exp_s)/last_s*100
-        overhead=100*(self.total_s/self.last_s)-100
+        if ( self.cur_s>0 ):
+            overhead=100*(self.total_s/self.cur_s)-100
+        else:
+            overhead=100
         print()
-        print( "Summary: last %d %fMiB nolock %d %fMiB keep %d %fMiB expired %d %fMiB overhead %.2f%% "%
-            ( self.last_n,self.last_s/2**20, self.ver_nolock_n,self.ver_nolock_s/2**20, self.ver_keep_n,self.ver_keep_s/2**20, self.ver_exp_n,self.ver_exp_s/2**20, overhead ) )
-        print( "   total   : %5s %7.2fMiB"%(self.total_n,      self.total_s/2**20))
-        print( "   current : %5s %7.2fMiB"%(self.last_n,       self.last_s/2**20))
+        print( "Summary %s: current %d %fMiB version %d %fMiB ver_expired %d %fMiB overhead %.2f%% "%
+            ( self.bucket_name, self.cur_n,self.cur_s/2**20, self.ver_n,self.ver_s/2**20, self.ver_exp_n,self.ver_exp_s/2**20, overhead ) )
+        print( "   current : %5s %7.2fMiB"%(self.cur_n,       self.cur_s/2**20))
         print( "     nolock: %5s %7.2fMiB"%(self.cur_nolock_n, self.cur_nolock_s/2**20))
         print( "     expird: %5s %7.2fMiB"%(self.cur_exp_n,    self.cur_exp_s/2**20))
         print( "   version : %5s %7.2fMiB"%(self.ver_n,        self.ver_s/2**20))
@@ -125,7 +134,7 @@ class S3Bucket:
         print( "     expird: %5s %7.2fMiB"%(self.ver_exp_n,    self.ver_exp_s/2**20))
         print( "   cleanup : %5s %7.2fMiB"%(self.ops_cleanup_n,self.ops_cleanup_s/2**20))
         print( "   extend  : %5s %7.2fMiB"%(self.ops_extend_n, self.ops_extend_s/2**20))
-        print( "Check total: n %d/%d s %d/%d"%( self.last_n+self.ver_n,self.total_n, self.last_s+self.ver_s,self.total_s) )
+        print( "Check total: n %d/%d s %d/%d"%( self.cur_n+self.ver_n,self.total_n, self.cur_s+self.ver_s,self.total_s) )
 
     def objectlock_page(self,NextKeyMarker,NextVersionIdMarker):
         ## https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3/client/list_object_versions.html
@@ -165,8 +174,8 @@ class S3Bucket:
             ## current, old version or deleted
             current= not ( v["IsLatest"] == False ) ## safer as it will not match unknown/null
             if ( current ): 
-                self.last_n+=1
-                self.last_s+=v["Size"]
+                self.cur_n+=1
+                self.cur_s+=v["Size"]
                 cstate="-"
             else:
                 self.ver_n+=1
@@ -191,6 +200,7 @@ class S3Bucket:
 
             age=(today-v["LastModified"]).total_seconds()/(24*60*60) ## days
 
+            expired=False
             update=False
             exempt=False
             state="-"
@@ -199,16 +209,21 @@ class S3Bucket:
                     exempt=True
 
             ## check OL mode and expiration date
-            if ( ol["Mode"]==None ):
+            if ( ol["Mode"] == None or ol["Mode"] != args.lockmode ): 
                 if ( not exempt ) :
                     state="N"
                     update=True
-            elif ( dt<=0 ):
+            elif ( dt < 0 ) :
                 state="E"
+                expired=True
                 update=True
+            elif ( dt < args.lockdays/2 ) :
+                update=True
+            elif ( dt > args.lockmax ):
+                state="M"
 
             ## collect some stats
-            if ( update ) :
+            if ( expired ) :
                 if ( current ) :
                     self.cur_exp_n+=1
                     self.cur_exp_s+=v["Size"]
@@ -218,6 +233,9 @@ class S3Bucket:
 
             if ( args.quiet == False or state != "-"):
                 print("%1s%1s %+ 7.2fd % 6.2fd %6.2fMiB %s %s"%(cstate,state,dt,age,v["Size"]/2**20,ol["Mode"],v["Key"]) )
+            if ( state=="X" ):
+                print("  ALERT: this object lock is too far in the future, >%d days"%args.lockmax)
+                #print("    b2 update-file-retention --profile MAK --bypassGovernance --retainUntil=%d %s %s %s"%(int(ts_new),v["Key"],i["fileId"],"governance") )
 
             ## clean-up old versions and deleted files
             ## bucket lifecycle should take care of this actually, so this is mostly a sanity check
@@ -235,11 +253,11 @@ class S3Bucket:
                 self.ops_extend_n+=1
                 self.ops_extend_s+=v["Size"]
                 date_new=today+timedelta(days=args.lockdays)
-                if ( args.update ):
-                    print( "  apply extend retention of %s to %s"%(v["Key"],date_new) )
+                if ( args.extend ):
+                    print( "  apply extend retention of %s to %s (%.2f->%.2f)"%(v["Key"],date_new,dt,args.lockdays) )
                     self.set_objectlock(v["Key"],v["VersionId"],date_new)
                 else:
-                    print( "  should extend retention of %s to %s"%(v["Key"],date_new) )
+                    print( "  should extend retention of %s to %s (%.2f->%.2f)"%(v["Key"],date_new,dt,args.lockdays) )
         # end for obj
 
         ## next page?
@@ -261,15 +279,13 @@ args = None
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="check or update B2 Object Locks"
+        description="check or update S3/B2 Object Locks"
     )
     ## https://stackoverflow.com/questions/25295487/python-argparse-value-range-help-message-appearance
-    #parser.add_argument("--profile",  help="B2 profile", required=True)
-    #parser.add_argument("--fileagemax", help="max age of ls cache file in seconds, default=600", default=(10*60))
     parser.add_argument("--lockmode", help="Lock mode",choices=["governance"],default="governance") ## play safe
     #parser.add_argument("--lockmode", help="Lock mode",choices=["governance","compliance"],default="governance")
     parser.add_argument("--lockdays", help="Lock for days, default=7",type=int,default=7,choices=range(0, 91),metavar="[0-90]" )
-    parser.add_argument("--lockmax",  help="Max Lock for days, default=30",type=int,default=30,choices=range(0,91),metavar="[0-90]" )
+    parser.add_argument("--lockmax",  help="Max Lock for days, default=30",type=int,default=30,choices=range(0,91),metavar="[0-90]" ) ## to be re-implemented
     parser.add_argument("--cleanage", help="Age threshold for clean-up versions and deleted files",type=int,default=7,choices=range(0,91),metavar="[0-90]" )
     parser.add_argument("--cleanup",  help="Apply cleanup",action="store_true")
     parser.add_argument("--extend",   help="Set lock mode & extend retention days",action="store_true")
@@ -283,6 +299,9 @@ def main():
     if ( args.lockmax <= args.lockdays ):
         args.lockmax = (args.lockdays * 1.10)
         print("WARNING: lockmax < lockdays, reset to %f days"%args.lockmax)
+    ## parser.print_help(sys.stderr)
+    args.lockmode=args.lockmode.upper()
+    args.profile=args.bucket
     ## debug args
     print(args)
 
@@ -296,16 +315,30 @@ def main():
     ## https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
     ## https://github.com/boto/boto3/blob/develop/boto3/session.py
     ## https://github.com/boto/botocore/blob/develop/botocore/session.py
-    boto3.setup_default_session(profile_name='minio')
+    try:
+        boto3.setup_default_session(profile_name=args.profile)
+    except botocore.exceptions.ProfileNotFound as exception:
+        logging.warning(f"Exception: {type(exception).__name__}: {exception}")
+        try:
+            (args.profile,args.bucket)=args.profile.split('.',1)
+            boto3.setup_default_session(profile_name=args.profile)
+        except botocore.exceptions.ProfileNotFound as exception:
+            logging.warning(f"Exception: {type(exception).__name__}: {exception}")
+            print(" No profile found matching %s or %s.%s. Check your ~/.aws/config file."%(args.profile,args.profile,args.bucket) )
+            return 1
     s=boto3._get_default_session()
     cfg=s._session.get_scoped_config()
     #pprint(s._session.get_scoped_config())
     cfg_url=cfg["endpoint_url"]
-    cfg_verify=cfg["https_validate_certificates"]
-    if ( cfg_verify=="False" or cfg_verify=="false" ):
-        cfg_verify=False
-    else:
+    try:
         cfg_verify=True
+        cfg_verify=cfg["https_validate_certificates"]
+        if ( cfg_verify=="False" or cfg_verify=="false" ):
+            cfg_verify=False
+    except:
+        pass
+    if ( "bucket" in cfg ):
+        args.bucket = cfg["bucket"]
 
     s3 = boto3.client('s3',endpoint_url=cfg_url,verify=cfg_verify)
     #s3 = boto3.client('s3',verify=False)
@@ -314,12 +347,17 @@ def main():
 
     bucket=S3Bucket(s3,args.bucket)
     try:
-        bucket.get_object_lock_configuration()
-    except BaseException as exception:
-        #logging.warning(f"Exception Name: {type(exception).__name__}")
-        logging.warning(f"Exception Desc: {exception}")
+        bucket.head_bucket()
+    except botocore.exceptions.ClientError as exception:
+        logging.warning(f"Exception Desc: {type(exception).__name__}: {exception}")
         bucket.list_buckets()
         return 1
+
+    try:
+        bucket.get_object_lock_configuration()
+    except botocore.exceptions.ClientError as exception:
+        logging.warning(f"Exception Desc: {type(exception).__name__}: {exception}")
+        pass
 
     bucket.objectlock()
     return 0
